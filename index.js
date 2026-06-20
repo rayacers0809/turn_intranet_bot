@@ -524,6 +524,82 @@ app.get('/health', async (req, res) => {
 });
 
 
+
+// ════════════════════════════════════════════════════════
+// 웹훅 발송 (인트라넷에서 공지/보고서 등 작성 시)
+// ════════════════════════════════════════════════════════
+
+// POST /api/intranet/notify - Firebase ID 토큰 인증 후 웹훅 발송
+// body: { factionId, type: 'notice'|'rp'|'trade'|'warn'|'member', data: {...} }
+app.post('/api/intranet/notify', authMiddleware, async (req, res) => {
+  const { factionId, type, data } = req.body;
+  if (!factionId || !type) {
+    return res.status(400).json({ ok: false, reason: '필수 값 누락' });
+  }
+
+  try {
+    // 팩션의 웹훅 설정 조회
+    const facDoc = await db.collection('factions').doc(factionId).get();
+    if (!facDoc.exists) return res.status(404).json({ ok: false, reason: '팩션 없음' });
+
+    // 요청자가 해당 팩션 멤버인지 확인 (권한)
+    const memberDoc = await db.collection('factions').doc(factionId).collection('members').doc(req.session.userId).get();
+    if (!memberDoc.exists) return res.status(403).json({ ok: false, reason: '권한 없음' });
+
+    const webhooks = facDoc.data().webhooks || {};
+    const url = webhooks[type];
+    if (!url || !url.includes('discord.com/api/webhooks/')) {
+      return res.json({ ok: true, skipped: true, reason: '웹훅 미설정' });
+    }
+
+    // 타입별 임베드 구성
+    const factionName = facDoc.data().factionName || '팩션';
+    const embeds = buildEmbed(type, data, factionName);
+
+    await axios.post(url, { username: `${factionName} 인트라넷`, embeds });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[notify]', err.message);
+    res.status(500).json({ ok: false, reason: err.message });
+  }
+});
+
+// 타입별 Discord 임베드 생성
+function buildEmbed(type, d, factionName) {
+  const colors = { notice:0x2563EB, rp:0x8B5CF6, trade:0xF59E0B, warn:0xEF4444, member:0x22C55E };
+  const titles = { notice:'📢 새 공지사항', rp:'📋 RP 보고서', trade:'💰 거래 보고서', warn:'⚠️ 내부경고', member:'👤 팩션원 변동' };
+  const fields = [];
+
+  if (type === 'notice') {
+    fields.push({ name: '제목', value: String(d.title || '-').slice(0,256) });
+    if (d.content) fields.push({ name: '내용', value: String(d.content).slice(0,1024) });
+    fields.push({ name: '작성자', value: String(d.author || '-'), inline: true });
+  } else if (type === 'rp') {
+    fields.push({ name: '구역', value: String(d.zone || '-'), inline: true });
+    fields.push({ name: '결과', value: d.result === 'win' ? '✅ 승리' : '❌ 패배', inline: true });
+    fields.push({ name: '작성자', value: String(d.author || '-'), inline: true });
+  } else if (type === 'trade') {
+    fields.push({ name: '물품', value: String(d.item || '-'), inline: true });
+    fields.push({ name: '수량', value: String(d.qty || 0) + '개', inline: true });
+    fields.push({ name: '금액', value: '₩' + Number(d.amount||0).toLocaleString(), inline: true });
+    fields.push({ name: '작성자', value: String(d.author || '-'), inline: true });
+  } else if (type === 'warn') {
+    fields.push({ name: '대상', value: String(d.target || '-'), inline: true });
+    fields.push({ name: '수위', value: String(d.level || '-'), inline: true });
+    if (d.reason) fields.push({ name: '사유', value: String(d.reason).slice(0,1024) });
+  } else if (type === 'member') {
+    fields.push({ name: '내용', value: String(d.message || '-') });
+  }
+
+  return [{
+    title: titles[type] || '알림',
+    color: colors[type] || 0x2563EB,
+    fields,
+    footer: { text: `${factionName} · Turn City Intranet` },
+    timestamp: new Date().toISOString(),
+  }];
+}
+
 // ════════════════════════════════════════════════════════
 // 게임(FiveM) 연동 - 출퇴근
 // ════════════════════════════════════════════════════════
